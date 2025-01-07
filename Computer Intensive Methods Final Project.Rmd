@@ -1,0 +1,385 @@
+---
+title: "Clean Final Project V3"
+author: "Vincent Jia"
+date: "2024-12-19"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stats)
+library(ggplot2)
+library(microbenchmark)
+library(qrng)
+options(scipen = 999) # Remove scientific notation
+set.seed(1) # set global seeds
+```
+
+
+```{r}
+# clears the environment
+rm(list = ls())
+```
+
+## Naive MC
+
+```{r}
+calculate_asian_estimator_statistics_mc <- function(batches = 100, n = 1600, 
+                                                    S0 = 50, r = 0.05, sigma = 0.2, 
+                                                    K = 54, T = 5, m = 4)
+{
+  calculate_asian_price_mc <- function(n, S0, r, sigma, K, T, m)
+  {
+    delta <- T / m                 
+    payoffs <- numeric(n)          
+    
+    for (i in 1:n) 
+    {
+      Z <- rnorm(m)                
+      stockpath <- numeric(m)      
+      stockpath[1] <- S0 * exp((r - 0.5 * sigma^2) * delta + sigma * sqrt(delta) * Z[1])
+      
+      for (j in 2:m)
+      {
+        stockpath[j] <- stockpath[j-1] * exp((r - 0.5 * sigma^2) * delta + 
+                                               sigma * sqrt(delta) * Z[j])
+      }
+      average_price <- mean(stockpath)  
+      payoffs[i] <- exp(-r * T) * max(average_price - K, 0)  
+    }
+    return(mean(payoffs)) 
+  }
+      
+  sample_means <- numeric(batches)
+  for (i in 1:batches) {
+    sample_means[i] <- calculate_asian_price_mc(n, S0, r, sigma, K, T, m)
+  }
+  
+  estimator_variance <- var(sample_means)  
+  estimator_mean <- mean(sample_means)    
+  
+  return(list(
+    estimator_variance = estimator_variance,
+    estimator_mean = estimator_mean))
+}
+```
+
+
+```{r}
+set.seed(1)
+m_values <- c(2, 4, 20, 40)
+n_values <- c(50, 100, 200, 400, 800, 1600)
+
+# Initialize an empty data frame to store results
+my_df1 <- data.frame(m = numeric(), n = numeric(), estimator_variance = numeric(),
+                     estimator_mean = numeric())
+
+for (m in m_values)
+{
+  for (n in n_values)
+  {
+    stats <- calculate_asian_estimator_statistics_mc(m = m, n = n)
+    my_df1 <- rbind(my_df1, 
+                    data.frame(m = m, 
+                               n = n, 
+                               estimator_variance = stats$estimator_variance, 
+                               estimator_mean = stats$estimator_mean))
+  }
+}
+
+# Print the results
+print(my_df1)
+  
+```
+
+## Quadratic WMC
+
+```{r}
+calculate_asian_estimator_statistics_quadratic <- function(batches = 100, 
+                                                           n = 1600, S0 = 50, r = 0.05, 
+                                                           sigma = 0.2, K = 54, T = 5, m = 4) {
+  calculate_asian_price_quadratic <- function(S0, r, K, T, sigma, n, m) {
+    delta <- T / m
+    
+    # Initialize all matrices
+    stockpaths_matrix <- matrix(NA, nrow = n, ncol = m)
+    risk_free_growth_matrix <- matrix(NA, nrow = n, ncol = m)
+    control_variate_matrix <- matrix(NA, nrow = n, ncol = m)
+    payoffs <- numeric(n)
+    
+    for (sample_index in 1:n) {
+      Z <- rnorm(m)
+      stockpath <- numeric(m)
+      stockpath[1] <- S0 * exp((r - (0.5 * sigma^2)) * delta + sigma * sqrt(delta) * Z[1])
+      
+      for (time_step in 2:m) {
+        stockpath[time_step] <- stockpath[time_step - 1] * exp((r - (0.5 * sigma^2)) * delta 
+                                                               + sigma * sqrt(delta) * Z[time_step])
+      }
+      stockpaths_matrix[sample_index, ] <- stockpath
+      average_price <- mean(stockpath)
+      payoffs[sample_index] <- exp(-r * T) * max(average_price - K, 0)
+    }
+    
+    # Risk-free growth paths
+    time_vector <- seq(delta, T, by = delta)
+    risk_free_growth_path <- S0 * exp(r * time_vector)
+    risk_free_growth_matrix <- matrix(rep(risk_free_growth_path, times = n), 
+                                      nrow = n, byrow = TRUE)
+    
+    # Control Variate Matrix
+    control_variate_matrix <- stockpaths_matrix - risk_free_growth_matrix
+    
+    # Population covariance matrix and mean vector
+    pop_cov_matrix <- cov(control_variate_matrix) * (nrow(control_variate_matrix) - 1) / 
+      nrow(control_variate_matrix)
+    mean_pop_cov_vec_untransposed <- colMeans(control_variate_matrix)
+    mean_pop_cov_vec <- matrix(mean_pop_cov_vec_untransposed, nrow = m, ncol = 1)
+    
+    # Optimal weights
+    optimal_weights <- numeric(n)
+    inv_pop_cov_matrix <- solve(pop_cov_matrix)
+    
+    for (sample_index in 1:n) {
+      X_i <- matrix(control_variate_matrix[sample_index, ], nrow = m, ncol = 1)
+      optimal_weights[sample_index] <- 1 + mean_pop_cov_vec_untransposed %*% 
+        inv_pop_cov_matrix %*% (mean_pop_cov_vec - X_i)
+    }
+    weighted_payoffs <- optimal_weights * payoffs
+    return(mean(weighted_payoffs))
+  }
+  
+  sample_means <- numeric(batches)
+  for (batch_index in 1:batches) {
+    sample_means[batch_index] <- calculate_asian_price_quadratic(S0, r, K, T, sigma, n, m)
+  }
+  estimator_variance <- var(sample_means)  
+  estimator_mean <- mean(sample_means)    
+  
+  return(list(
+    estimator_mean = estimator_mean,
+    estimator_variance = estimator_variance
+  ))
+}
+```
+
+```{r}
+set.seed(1)
+m_values <- c(2, 4, 20, 40)
+n_values <- c(50, 100, 200, 400, 800, 1600)
+
+# Initialize an empty data frame to store results
+my_df2 <- data.frame(m = numeric(), n = numeric(), estimator_variance = numeric(), 
+                     estimator_mean = numeric())
+
+for (m in m_values)
+{
+  for (n in n_values)
+  {
+    stats <- calculate_asian_estimator_statistics_quadratic(m = m, n = n)
+    my_df2 <- rbind(my_df2, 
+                    data.frame(m = m, 
+                               n = n, 
+                               estimator_variance = stats$estimator_variance, 
+                               estimator_mean = stats$estimator_mean))
+  }
+}
+
+# Print the results
+print(my_df2)
+```
+
+## Array RQMC for Naive MC
+
+```{r}
+calculate_asian_estimator_statistics_mc_rqmc <- function(batches = 100, S0 = 50, 
+                                                         r=0.05, sigma=0.2, T=5, K=54, 
+                                                         n=1600, m=4) {
+  
+  calculate_asian_price_mc_rqmc <- function(S0, r, sigma, T, K, n, m) {
+    delta <- T / m  # Time increment
+    
+    
+    full_rqmc_matrix <- matrix(NA, nrow = n, ncol = m)
+    for (i in 1:m) {
+      u <- ghalton(n, d = 1, method = "generalized")
+      full_rqmc_matrix[, i] <- u
+    }
+
+    z_matrix <- qnorm(full_rqmc_matrix)
+
+    stockpaths_matrix <- matrix(NA, nrow = n, ncol = m + 1)
+    stockpaths_matrix[, 1] <- S0 # Set initial stock price
+
+    # Calculate stock paths
+    for (i in 1:n) {
+      for (j in 2:(m + 1)) {
+        stockpaths_matrix[i, j] <- stockpaths_matrix[i, j - 1] * exp(
+          (r - 0.5 * sigma^2) * delta + sigma * sqrt(delta) * z_matrix[i, j - 1]
+        )
+      }
+    }
+
+    # Remove the initial column for calculations
+    stockpaths_matrix <- stockpaths_matrix[, -1]
+    # sort matrix by column
+    stockpaths_matrix_sorted <- apply(stockpaths_matrix, 2, sort)
+    
+    row_averages <- rowMeans(stockpaths_matrix_sorted) 
+    payoffs <- pmax(row_averages - K, 0)         
+    mean_payoff <- mean(payoffs)                
+
+    return(mean_payoff)
+  }
+  
+  # Initialize a vector to store results
+  sample_means <- numeric(batches)
+  
+  # Call the calculate function `batches` times
+  for (i in 1:batches) {
+    sample_means[i] <- calculate_asian_price_mc_rqmc(S0, r, sigma, T, K, n, m)
+  }
+  
+  estimator_variance = var(sample_means)
+  estimator_mean = mean(sample_means)
+  return(list(estimator_variance = estimator_variance, 
+           estimator_mean = estimator_mean))
+}
+```
+
+```{r}
+set.seed(1)
+m_values <- c(2, 4, 20, 40)
+n_values <- c(50, 100, 200, 400, 800, 1600)
+
+# Initialize an empty data frame to store results
+my_df3 <- data.frame(m = numeric(), n = numeric(), estimator_variance = numeric(), 
+                     estimator_mean = numeric())
+
+for (m in m_values)
+{
+  for (n in n_values)
+  {
+    stats <- calculate_asian_estimator_statistics_mc_rqmc(m = m, n = n)
+    my_df3 <- rbind(my_df3, 
+                    data.frame(m = m, 
+                               n = n, 
+                               estimator_variance = stats$estimator_variance, 
+                               estimator_mean = stats$estimator_mean))
+  }
+}
+
+# Print the results
+print(my_df3)
+```
+
+## Array RQMC for Quadratic WMC
+
+
+```{r}
+calculate_asian_estimator_statistics_quadratic_rqmc <- function(batches = 100, 
+                                                                n = 1600, S0 = 50, 
+                                                                r = 0.05, sigma = 0.2, 
+                                                                K = 54, T = 5, m = 4)
+{
+  calculate_asian_price_quadratic_rqmc <- function(n, S0, r, sigma, K, T, m) 
+  {
+    delta <- T / m  # Time increment
+    full_rqmc_matrix <- matrix(NA, nrow = n, ncol = m)
+    
+    for (i in 1:m){
+      u <-  ghalton(n, d = 1, method = "generalized")
+      full_rqmc_matrix[, i] <- u
+    }
+    
+    z_matrix <- qnorm(full_rqmc_matrix)
+    
+    stockpaths_matrix <- matrix(NA, nrow = n, ncol = m + 1)
+    stockpaths_matrix[, 1] <- S0 # Set initial stock price
+    
+    for (i in 1:n) {
+      for (j in 2:(m + 1)) {
+      stockpaths_matrix[i, j] <- stockpaths_matrix[i, j - 1] * exp(
+        (r - 0.5 * sigma^2) * delta + sigma * sqrt(delta) * z_matrix[i, j - 1])
+      }
+    }
+    # Remove the initial column for calculations
+    stockpaths_matrix <- stockpaths_matrix[, -1]
+    # sort matrix by column
+    stockpaths_matrix_sorted <- apply(stockpaths_matrix, 2, sort)
+    
+  
+    # calculate payoff on sorted stockpaths
+    row_averages <- rowMeans(stockpaths_matrix_sorted) 
+    payoffs <- pmax(row_averages - K, 0)
+    
+    time_vector <- seq(delta, T, by = delta)
+    risk_free_growth_path <- S0 * exp(r * time_vector)
+    risk_free_growth_matrix <- matrix(rep(risk_free_growth_path, times = n), nrow = n, byrow = TRUE)
+    
+    # Control Variate Matrix
+    # stockpaths_matrix_sorted
+    control_variate_matrix <- stockpaths_matrix_sorted - risk_free_growth_matrix
+      
+    # Population covariance matrix and mean vector
+    pop_cov_matrix <- cov(control_variate_matrix) * (nrow(control_variate_matrix) - 1) / nrow(control_variate_matrix)
+    mean_pop_cov_vec_untransposed <- colMeans(control_variate_matrix)
+    mean_pop_cov_vec <- matrix(mean_pop_cov_vec_untransposed, nrow = m, ncol = 1)
+      
+    # Optimal weights
+    optimal_weights <- numeric(n)
+    inv_pop_cov_matrix <- solve(pop_cov_matrix)
+                  
+    for (sample_index in 1:n) {
+      X_i <- matrix(control_variate_matrix[sample_index, ], nrow = m, ncol = 1)
+      optimal_weights[sample_index] <- 1 + mean_pop_cov_vec_untransposed %*% 
+        inv_pop_cov_matrix %*% (mean_pop_cov_vec - X_i)
+    }
+    weighted_payoffs <- optimal_weights * payoffs
+    return(mean(weighted_payoffs))
+  }
+  
+  sample_means <- numeric(batches)
+  
+  for (i in 1:batches) {
+    sample_means[i] <- calculate_asian_price_quadratic_rqmc(n, S0, r, sigma, K, T, m)
+  }
+  
+  estimator_variance = var(sample_means)
+  estimator_mean = mean(sample_means)
+  return(list(estimator_variance = estimator_variance, 
+           estimator_mean = estimator_mean))
+  
+  
+}
+```
+
+
+```{r}
+set.seed(1)
+m_values <- c(2, 4, 20, 40)
+n_values <- c(50, 100, 200, 400, 800, 1600)
+
+# Initialize an empty data frame to store results
+my_df4 <- data.frame(m = numeric(), n = numeric(), estimator_variance = numeric(),
+                     estimator_mean = numeric())
+
+for (m in m_values)
+{
+  for (n in n_values)
+  {
+    stats <- calculate_asian_estimator_statistics_quadratic_rqmc(m = m, n = n)
+    my_df4 <- rbind(my_df4, 
+                    data.frame(m = m, 
+                               n = n, 
+                               estimator_variance = stats$estimator_variance, 
+                               estimator_mean = stats$estimator_mean))
+  }
+}
+
+# Print the results
+print(my_df4)
+
+```
